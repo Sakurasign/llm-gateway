@@ -30,8 +30,15 @@ public record Channel(
         Duration timeout,
         boolean passthrough,
         boolean enabled,
-        boolean apiKeyInQuery
+        boolean apiKeyInQuery,
+        AccountProxy proxy
 ) {
+
+    public Channel(long id, String name, Protocol protocol, String baseUrl, String apiKey,
+                   int priority, int weight, int maxInflight, Duration timeout,
+                   boolean passthrough, boolean enabled, boolean apiKeyInQuery) {
+        this(id, name, protocol, baseUrl, apiKey, priority, weight, maxInflight, timeout, passthrough, enabled, apiKeyInQuery, null);
+    }
 
     /** 兼容旧构造：默认 header 传凭证。 */
     public Channel(long id, String name, Protocol protocol, String baseUrl, String apiKey,

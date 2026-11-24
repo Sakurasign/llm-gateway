@@ -16,12 +16,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * 只读的管理端查询 API。
- *
- * <p>M6 阶段先提供「看得见」的能力：渠道健康、模型路由、系统概览。
- * 写操作（增删改渠道）在下一迭代接入，需配合配置版本与热更新。
- */
 @RestController
 @RequestMapping("/admin/api/v1")
 public class AdminQueryController {
@@ -41,7 +35,7 @@ public class AdminQueryController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("version", table.version());
         out.put("models", table.knownModels().size());
-        out.put("channels", collectChannels(table).size());
+        out.put("channels", table.channels().size());
         return ResponseEntity.ok(out);
     }
 
@@ -50,7 +44,8 @@ public class AdminQueryController {
     public ResponseEntity<?> channels() {
         RouteTable table = tables.table();
         List<Map<String, Object>> list = new ArrayList<>();
-        for (Channel c : collectChannels(table)) {
+        for (Channel c : table.channels().values().stream().sorted(java.util.Comparator.comparingLong(Channel::id)).toList()) {
+            if (table.isAccountChannel(c.id())) continue;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", c.id());
             m.put("name", c.name());
@@ -61,9 +56,12 @@ public class AdminQueryController {
             m.put("maxInflight", c.maxInflight());
             m.put("passthrough", c.passthrough());
             m.put("enabled", c.enabled());
+            m.put("timeoutMs", c.timeout().toMillis());
+            m.put("apiKeyInQuery", c.apiKeyInQuery());
+            m.put("hasCredential", !c.apiKey().isBlank());
             list.add(m);
         }
-        return ResponseEntity.ok(Map.of("data", list));
+        return ResponseEntity.ok(Map.of("data", list, "version", table.version()));
     }
 
     /** 虚拟模型与其路由。 */
@@ -73,23 +71,28 @@ public class AdminQueryController {
         List<Map<String, Object>> list = new ArrayList<>();
         for (String name : table.knownModels()) {
             List<Map<String, Object>> routes = new ArrayList<>();
-            for (var c : table.candidates(name)) {
-                ModelRoute r = c.route();
+            for (ModelRoute r : table.routes(name)) {
+                if (r.accountId() != null) continue;
+                Channel channel = r.channel();
                 Map<String, Object> rm = new LinkedHashMap<>();
-                rm.put("channelId", c.channel().id());
-                rm.put("channelName", c.channel().name());
+                rm.put("id", r.id());
+                rm.put("channelId", channel.id());
+                rm.put("channelName", channel.name());
                 rm.put("upstreamModel", r.upstreamModel());
-                rm.put("priority", c.channel().priority());
+                rm.put("priority", channel.priority());
                 rm.put("weight", r.weight());
-                rm.put("protocol", c.channel().protocol().name());
+                rm.put("priceRatio", r.priceRatio());
+                rm.put("protocol", channel.protocol().name());
+                rm.put("enabled", channel.enabled());
                 routes.add(rm);
             }
+            if (routes.isEmpty()) continue;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("name", name);
             m.put("routes", routes);
             list.add(m);
         }
-        return ResponseEntity.ok(Map.of("data", list));
+        return ResponseEntity.ok(Map.of("data", list, "version", table.version()));
     }
 
     /** 单个模型的熔断状态。 */
@@ -99,15 +102,5 @@ public class AdminQueryController {
                 "channelId", channelId,
                 "model", model,
                 "state", breaker.state(channelId, model).name()));
-    }
-
-    private static List<Channel> collectChannels(RouteTable table) {
-        Map<Long, Channel> byId = new LinkedHashMap<>();
-        for (String model : table.knownModels()) {
-            for (var c : table.candidates(model)) {
-                byId.putIfAbsent(c.channel().id(), c.channel());
-            }
-        }
-        return new ArrayList<>(byId.values());
     }
 }

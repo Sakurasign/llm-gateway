@@ -16,6 +16,11 @@ public record ModelRoute(
         Channel channel,
         String upstreamModel,
         int weight,
-        double priceRatio
+        double priceRatio,
+        Long accountId,
+        String accountGroup
 ) {
+    public ModelRoute(long id, String virtualModel, Channel channel, String upstreamModel, int weight, double priceRatio) {
+        this(id, virtualModel, channel, upstreamModel, weight, priceRatio, null, null);
+    }
 }

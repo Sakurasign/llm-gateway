@@ -32,7 +32,10 @@ public class CostCalculator {
      * @param microUsd 成本（micro-USD，已含倍率与折扣）
      * @param tier    命中的档位（便于日志与对账）
      */
-    public record Cost(long microUsd, PriceRule.Tier tier) {
+    public record Cost(long microUsd, PriceRule.Tier tier, Long accountMicroUsd) {
+        public Cost(long microUsd, PriceRule.Tier tier) {
+            this(microUsd, tier, null);
+        }
     }
 
     /**
@@ -111,9 +114,11 @@ public class CostCalculator {
         BigDecimal discount = nz(rule.groupDiscount()).compareTo(BigDecimal.ZERO) == 0
                 ? BigDecimal.ONE : rule.groupDiscount();
 
-        BigDecimal finalUsd = usd.multiply(multiplier).multiply(discount);
+        BigDecimal accountUsd = usd.multiply(multiplier);
+        BigDecimal finalUsd = accountUsd.multiply(discount);
         long micro = finalUsd.multiply(MICRO).setScale(0, RoundingMode.HALF_UP).longValue();
-        return new Cost(Math.max(0L, micro), tier);
+        long accountMicro = accountUsd.multiply(MICRO).setScale(0, RoundingMode.HALF_UP).longValue();
+        return new Cost(Math.max(0L, micro), tier, Math.max(0L, accountMicro));
     }
 
     /**

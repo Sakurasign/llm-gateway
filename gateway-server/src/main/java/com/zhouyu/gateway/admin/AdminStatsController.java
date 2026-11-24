@@ -34,40 +34,41 @@ public class AdminStatsController {
                                   @RequestParam(required = false) String model,
                                   @RequestParam(required = false) String channel,
                                   @RequestParam(required = false) Integer status,
-                                  @RequestParam(required = false) String requestId) {
+                                  @RequestParam(required = false) String requestId,
+                                  @RequestParam(required = false) Long accountId,
+                                  @RequestParam(required = false) Long groupId,
+                                  @RequestParam(required = false) java.time.LocalDate from,
+                                  @RequestParam(required = false) java.time.LocalDate to,
+                                  @RequestParam(defaultValue = "false") boolean modelOrder,
+                                  @RequestParam(defaultValue = "false") boolean ascending) {
         int limit = Math.min(Math.max(size, 1), 100);
         int offset = Math.max(page - 1, 0) * limit;
 
-        StringBuilder where = new StringBuilder(" WHERE created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)");
+        if (from != null && to != null && from.isAfter(to)) return ResponseEntity.badRequest().build();
+        StringBuilder where = new StringBuilder(from == null && to == null
+                ? " WHERE l.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)" : " WHERE 1=1");
         java.util.List<Object> args = new java.util.ArrayList<>();
-        if (model != null && !model.isBlank()) {
-            where.append(" AND virtual_model = ?");
-            args.add(model);
-        }
-        if (channel != null && !channel.isBlank()) {
-            where.append(" AND channel_name = ?");
-            args.add(channel);
-        }
-        if (status != null) {
-            where.append(" AND status_code = ?");
-            args.add(status);
-        }
-        if (requestId != null && !requestId.isBlank()) {
-            where.append(" AND request_id = ?");
-            args.add(requestId);
-        }
-
-        Integer total = jdbc.queryForObject("SELECT COUNT(1) FROM relay_log" + where,
-                Integer.class, args.toArray());
-
+        filter(where, args, "virtual_model", "=", model);
+        filter(where, args, "channel_name", "=", channel);
+        filter(where, args, "status_code", "=", status);
+        filter(where, args, "request_id", "=", requestId);
+        filter(where, args, "account_id", "=", accountId);
+        filter(where, args, "group_id", "=", groupId);
+        if (from != null) filter(where, args, "created_at", ">=", from.atStartOfDay());
+        if (to != null) filter(where, args, "created_at", "<", to.plusDays(1).atStartOfDay());
+        Integer total = jdbc.queryForObject("SELECT COUNT(1) FROM relay_log l" + where, Integer.class, args.toArray());
         args.add(limit);
         args.add(offset);
-        List<Map<String, Object>> rows = jdbc.queryForList(
-                "SELECT request_id, virtual_model, upstream_model, channel_name, protocol_in, protocol_out,"
-                        + " gateway_stream, status_code, error_code, input_tokens, output_tokens,"
-                        + " cost_micro, usage_source, ttft_ms, total_ms, created_at"
-                        + " FROM relay_log" + where + " ORDER BY id DESC LIMIT ? OFFSET ?",
-                args.toArray());
+        String order = modelOrder ? "l.virtual_model" : "l.created_at";
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT l.request_id,l.virtual_model,l.upstream_model,l.channel_name,l.protocol_in,l.protocol_out,
+                       l.gateway_stream,l.status_code,l.error_code,l.input_tokens,l.output_tokens,l.cached_tokens,
+                       l.cache_creation_tokens,l.uncached_input_tokens,l.reasoning_tokens,l.cost_micro,l.usage_source,
+                       l.ttft_ms,l.total_ms,l.created_at,l.account_id,l.group_id,l.inbound_endpoint,l.upstream_endpoint,
+                       l.reasoning_effort,l.billing_mode,l.account_cost_micro,l.retry_count,a.name AS account_name,g.name AS group_name
+                FROM relay_log l LEFT JOIN gateway_upstream_account a ON a.id=l.account_id
+                LEFT JOIN api_group g ON g.id=l.group_id
+                """ + where + " ORDER BY " + order + (ascending ? " ASC" : " DESC") + ", l.id DESC LIMIT ? OFFSET ?", args.toArray());
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("total", total == null ? 0 : total);
@@ -75,6 +76,12 @@ public class AdminStatsController {
         out.put("size", limit);
         out.put("data", rows);
         return ResponseEntity.ok(out);
+    }
+
+    private static void filter(StringBuilder where, List<Object> args, String column, String operator, Object value) {
+        if (value == null || value instanceof String text && text.isBlank()) return;
+        where.append(" AND l.").append(column).append(' ').append(operator).append(" ?");
+        args.add(value);
     }
 
     /** 单条日志详情。 */

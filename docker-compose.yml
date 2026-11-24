@@ -96,8 +96,10 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
       ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:?请在 .env 中设置 ADMIN_JWT_SECRET}
+      GATEWAY_CONFIG_KEY: ${GATEWAY_CONFIG_KEY:-}
+      GATEWAY_WORKBUDDY_CHECKIN: ${GATEWAY_WORKBUDDY_CHECKIN:-false}
       # 演示用客户端 Key
-      DEMO_API_KEY: ${DEMO_API_KEY:-sk-lg-demo-key-local}
+      DEMO_API_KEY: ${DEMO_API_KEY:-}
       # 上游地址
       UPSTREAM_BASE_URL: http://mock-primary:9000
       UPSTREAM_BACKUP_URL: http://mock-backup:9001

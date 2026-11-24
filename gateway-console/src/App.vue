@@ -1,71 +1,57 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Sunny, Moon, SwitchButton } from '@element-plus/icons-vue'
+import { DataBoard, Document, Key, Menu, Moon, SetUp, Grid, Sunny, SwitchButton, User } from '@element-plus/icons-vue'
 import { clearToken } from './api/client'
 import { useTheme } from './composables/useTheme'
 
 const route = useRoute()
 const router = useRouter()
 const { isDark, toggle } = useTheme()
-
-interface NavItem {
-  path: string
-  label: string
-}
-
-const navs: NavItem[] = [
-  { path: '/dashboard', label: '概览' },
-  { path: '/channels', label: '渠道' },
-  { path: '/models', label: '模型路由' },
-  { path: '/logs', label: '请求日志' },
-  { path: '/playground', label: 'Playground' }
+const groups = [
+  { label: '工作台', links: [{ path: '/dashboard', label: '运行概览', icon: DataBoard }] },
+  { label: '网关配置', links: [
+    { path: '/accounts', label: '账号管理', icon: User },
+    { path: '/groups', label: '分组管理', icon: Grid },
+    { path: '/ips', label: 'IP 管理', icon: SetUp }
+  ] },
+  { label: '使用', links: [
+    { path: '/keys', label: '我的密钥', icon: Key },
+    { path: '/logs', label: '使用记录', icon: Document }
+  ] }
 ]
-
 const isLogin = computed(() => route.path === '/login')
-
-function logout(): void {
-  clearToken()
-  router.push('/login')
-}
+const section = computed(() => groups.find(group => group.links.some(link => link.path === route.path)))
+const active = computed(() => section.value?.links.find(link => link.path === route.path))
+function logout() { clearToken(); void router.push('/login') }
 </script>
 
 <template>
-  <div v-if="isLogin" class="login-wrap">
-    <router-view />
-  </div>
+  <div v-if="isLogin" class="login-wrap"><router-view /></div>
   <div v-else class="layout">
     <aside class="sidebar">
-      <div class="brand">
-        LLM Gateway
-        <small>多模型接入网关</small>
-      </div>
-
-      <router-link
-        v-for="n in navs"
-        :key="n.path"
-        :to="n.path"
-        class="nav-item"
-        :class="{ active: route.path === n.path }"
-      >
-        {{ n.label }}
+      <router-link to="/dashboard" class="brand" aria-label="Sakura Gateway 概览">
+        <span class="brand-mark"><el-icon><Menu /></el-icon></span>
+        <span>Sakura Gateway<small>管理工作台</small></span>
       </router-link>
-
-      <div class="spacer" />
-
-      <div class="theme-toggle" @click="toggle">
-        <el-icon><component :is="isDark ? Sunny : Moon" /></el-icon>
-        <span>{{ isDark ? '切换浅色' : '切换深色' }}</span>
-      </div>
-
-      <div class="nav-item" @click="logout">
-        <el-icon style="vertical-align: -2px; margin-right: 4px"><SwitchButton /></el-icon>
-        退出登录
+      <nav aria-label="主导航" class="sidebar-nav">
+        <div v-for="group in groups" :key="group.label" class="nav-group">
+          <div class="nav-label">{{ group.label }}</div>
+          <router-link v-for="link in group.links" :key="link.path" :to="link.path" class="nav-item" :title="link.label">
+            <el-icon><component :is="link.icon" /></el-icon><span>{{ link.label }}</span>
+          </router-link>
+        </div>
+      </nav>
+      <div class="sidebar-foot">
+        <button class="nav-item" :title="isDark ? '浅色模式' : '深色模式'" @click="toggle">
+          <el-icon><component :is="isDark ? Sunny : Moon" /></el-icon><span>{{ isDark ? '浅色模式' : '深色模式' }}</span>
+        </button>
+        <button class="nav-item" title="退出登录" @click="logout"><el-icon><SwitchButton /></el-icon><span>退出登录</span></button>
       </div>
     </aside>
-
-    <main class="main">
-      <router-view />
-    </main>
+    <div class="workbench">
+      <header class="topbar"><span>{{ section?.label }}</span><span class="crumb">/</span><strong>{{ active?.label }}</strong></header>
+      <main class="main"><router-view /></main>
+    </div>
   </div>
 </template>

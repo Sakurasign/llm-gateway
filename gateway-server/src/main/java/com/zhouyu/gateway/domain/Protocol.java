@@ -6,6 +6,8 @@ package com.zhouyu.gateway.domain;
 public enum Protocol {
     OPENAI_CHAT,
     OPENAI_RESPONSES,
+    WORKBUDDY,
+    CODEX_SUBSCRIPTION,
     ANTHROPIC,
     GEMINI;
 
@@ -16,6 +18,8 @@ public enum Protocol {
         return switch (value.trim().toUpperCase()) {
             case "OPENAI_CHAT", "OPENAI" -> OPENAI_CHAT;
             case "OPENAI_RESPONSES", "RESPONSES" -> OPENAI_RESPONSES;
+            case "WORKBUDDY" -> WORKBUDDY;
+            case "CODEX_SUBSCRIPTION" -> CODEX_SUBSCRIPTION;
             case "GEMINI" -> GEMINI;
             default -> ANTHROPIC;
         };

@@ -1,5 +1,18 @@
-import type {
+import type { AccountProxy, AccountProxyInput,
   ChannelInfo,
+  CodexAccountStatus,
+  CodexWakeupInput,
+  CodexWakeupOverview,
+  AccountUsageStats,
+  ChannelPayload,
+  RoutePayload,
+  UpstreamAccount,
+  AccountMapping,
+  AccountGroup,
+  AccountGroupInput,
+  AccountOptions,
+  GatewayKey,
+  GatewayKeyInput,
   LoginResponse,
   LogQuery,
   PromptVersion,
@@ -43,8 +56,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new Error('UNAUTHORIZED')
   }
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${text}`)
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.message || body.detail || (res.status === 409 ? '配置冲突，请刷新后重试。' : `请求失败（${res.status}）`))
   }
   return (await res.json()) as T
 }
@@ -52,6 +65,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 interface DataList<T> {
   data: T[]
 }
+
+const body = (method: string, input?: unknown): RequestInit => ({ method, body: input === undefined ? undefined : JSON.stringify(input) })
+type VersionedList<T> = DataList<T> & { version: number }
 
 export const api = {
   login: (username: string, password: string): Promise<LoginResponse> =>
@@ -63,9 +79,75 @@ export const api = {
   overview: (): Promise<{ version: number; models: number; channels: number }> =>
     request('/admin/api/v1/overview'),
 
-  channels: (): Promise<DataList<ChannelInfo>> => request('/admin/api/v1/channels'),
+  channels: (): Promise<VersionedList<ChannelInfo>> => request('/admin/api/v1/channels'),
 
-  models: (): Promise<DataList<VirtualModelInfo>> => request('/admin/api/v1/models'),
+  models: (): Promise<VersionedList<VirtualModelInfo>> => request('/admin/api/v1/models'),
+
+  saveChannel: (version: number, input: ChannelPayload, id?: number) =>
+    request<{ version: number }>(`/admin/api/v1/channels${id ? `/${id}` : ''}?version=${version}`, body(id ? 'PUT' : 'POST', input)),
+  statusChannel: (version: number, id: number, enabled: boolean) =>
+    request<{ version: number }>(`/admin/api/v1/channels/${id}?version=${version}&enabled=${enabled}`, body('PATCH')),
+  deleteChannel: (version: number, id: number) =>
+    request<{ version: number }>(`/admin/api/v1/channels/${id}?version=${version}`, body('DELETE')),
+  saveRoute: (version: number, input: RoutePayload, id?: number) =>
+    request<{ version: number }>(`/admin/api/v1/routes${id ? `/${id}` : ''}?version=${version}`, body(id ? 'PUT' : 'POST', input)),
+  deleteRoute: (version: number, id: number) =>
+    request<{ version: number }>(`/admin/api/v1/routes/${id}?version=${version}`, body('DELETE')),
+  importConfig: (version: number, yaml: string) =>
+    request<{ version: number }>(`/admin/api/v1/config/import?version=${version}`, body('POST', { yaml })),
+  accounts: () => request<DataList<UpstreamAccount> & { bindings: { keyId: number; accountId: number }[]; keyIds: number[] }>('/admin/api/v1/accounts'),
+  createAnthropicAccount: (input: { name: string; apiKey: string; proxyId?: number }) =>
+    request<{ id: number }>('/admin/api/v1/accounts/anthropic', body('POST', input)),
+  replaceAnthropicKey: (id: number, apiKey: string) =>
+    request<{ id: number }>(`/admin/api/v1/accounts/${id}/anthropic-key`, body('PUT', { apiKey })),
+  createOpenAiAccount: (input: { name: string; apiKey: string; proxyId?: number }) =>
+    request<{ id: number }>('/admin/api/v1/accounts/openai-key', body('POST', input)),
+  replaceOpenAiKey: (id: number, apiKey: string) =>
+    request<{ id: number }>(`/admin/api/v1/accounts/${id}/openai-key`, body('PUT', { apiKey })),
+  loginClaude: (id?: number, proxyId?: number) => request<{ url: string; state: string }>(`/admin/api/v1/accounts/anthropic/login?${id ? `id=${id}` : proxyId ? `proxyId=${proxyId}` : ''}`, body('POST')),
+  confirmClaude: (state: string, callback: string) => request<{ id: number }>('/admin/api/v1/accounts/anthropic/confirm', body('POST', { state, callback })),
+  loginCodex: (id?: number, proxyId?: number) => request<{ url: string; state: string }>(`/admin/api/v1/accounts/codex/login?${id ? `id=${id}` : proxyId ? `proxyId=${proxyId}` : ''}`, body('POST')),
+  confirmCodex: (state: string, callback: string) => request<{ id: number }>('/admin/api/v1/accounts/codex/confirm', body('POST', { state, callback })),
+  importCodexAccounts: (input: unknown) => request<{ ids: number[]; skipped: number; errors: { row: number; message: string }[]; warnings: { row: number; message: string }[] }>('/admin/api/v1/accounts/codex/import', body('POST', input)),
+  accountSettings: (id: number) => request<{ mappings: AccountMapping[]; version: number; priority: number; concurrency: number; groupIds: number[]; proxyId: number }>(`/admin/api/v1/accounts/${id}/settings`),
+  testAccountModel: (id: number, model: string) => request<{ ok: boolean; elapsedMs: number; output: string | null; message: string | null }>(
+    `/admin/api/v1/accounts/${id}/test-model`, body('POST', { model })),
+  editAccount: (id: number, version: number, input: { name: string; enabled: boolean; mappings: AccountMapping[]; options: AccountOptions }) =>
+    request<{ version: number }>(`/admin/api/v1/accounts/${id}?version=${version}`, body('PUT', input)),
+  proxies: () => request<DataList<AccountProxy>>('/admin/api/v1/proxies'),
+  saveProxy: (input: AccountProxyInput, id?: number) => request(`/admin/api/v1/proxies${id ? `/${id}` : ''}`, body(id ? 'PUT' : 'POST', input)),
+  deleteProxy: (id: number) => request(`/admin/api/v1/proxies/${id}`, body('DELETE')),
+  testProxy: (id: number) => request<{ upstreamStatus: number }>(`/admin/api/v1/proxies/${id}/test`, body('POST')),
+  groups: () => request<DataList<AccountGroup>>('/admin/api/v1/groups'),
+  preferGroupAccount: (id: number, accountId: number | null) =>
+    request(`/admin/api/v1/groups/${id}/preferred-account`, body('PUT', { accountId })),
+  reorderGroupAccounts: (id: number, accountIds: number[]) =>
+    request(`/admin/api/v1/groups/${id}/account-order`, body('PUT', { accountIds })),
+  saveGroup: (input: AccountGroupInput, id?: number) => request<{ id: number }>(`/admin/api/v1/groups${id ? `/${id}` : ''}`, body(id ? 'PUT' : 'POST', input)),
+  deleteGroup: (id: number) => request(`/admin/api/v1/groups/${id}`, body('DELETE')),
+  bulkAccounts: (ids: number[], action: {enabled?: boolean; schedulable?: boolean}) => request('/admin/api/v1/accounts/bulk', body('POST', { ids, ...action })),
+  bulkKeys: (ids: number[], action: {enabled?: boolean; groupId?: number}) => request('/admin/api/v1/keys/bulk', body('POST', { ids, ...action })),
+  saveKeyIps: (id: number, ipAllow: string[], ipDeny: string[]) => request(`/admin/api/v1/keys/${id}/ips`, body('PUT', { ipAllow, ipDeny })),
+  keys: () => request<DataList<GatewayKey>>('/admin/api/v1/keys'),
+  saveKey: (input: GatewayKeyInput, id?: number) => request<{ id: number }>(`/admin/api/v1/keys${id ? `/${id}` : ''}`, body(id ? 'PUT' : 'POST', input)),
+  resetKeyUsage: (id: number, total: boolean) => request(`/admin/api/v1/keys/${id}/reset-usage?total=${total}`, body('POST')),
+  deleteKey: (id: number) => request(`/admin/api/v1/keys/${id}`, body('DELETE')),
+  useKey: (id: number) => request<{name: string; apiKey: string; models: AccountMapping[]}>(`/admin/api/v1/keys/${id}/use`, body('POST')),
+  loginWork: (realm: string, id?: number, proxyId?: number) => request<{ url: string; ticket: string }>(`/admin/api/v1/accounts/workbuddy/login?realm=${encodeURIComponent(realm)}${id ? `&id=${id}` : proxyId ? `&proxyId=${proxyId}` : ''}`, body('POST')),
+  confirmWork: (ticket: string) => request<{ id: number }>('/admin/api/v1/accounts/workbuddy/confirm', body('POST', { ticket })),
+  importWork: (input: unknown) => request<{ id: number }>('/admin/api/v1/accounts/workbuddy/import', body('POST', input)),
+  statusAccount: (id: number, enabled: boolean) => request(`/admin/api/v1/accounts/${id}?enabled=${enabled}`, body('PATCH')),
+  deleteAccount: (id: number) => request(`/admin/api/v1/accounts/${id}`, body('DELETE')),
+  accountModels: (id: number) => request<DataList<string>>(`/admin/api/v1/accounts/${id}/models`),
+  accountUsage: (id: number) => request<AccountUsageStats>(`/admin/api/v1/accounts/${id}/usage-stats`),
+  codexWakeups: () => request<CodexWakeupOverview>('/admin/api/v1/accounts/wakeups'),
+  saveCodexWakeup: (input: CodexWakeupInput, id?: string) => request<{ ok: boolean }>(
+    `/admin/api/v1/accounts/wakeups${id ? `/${id}` : ''}`, body(id ? 'PUT' : 'POST', input)),
+  runCodexWakeup: (id: string) => request<{ ok: boolean }>(`/admin/api/v1/accounts/wakeups/${id}/run`, body('POST')),
+  deleteCodexWakeup: (id: string) => request<{ ok: boolean }>(`/admin/api/v1/accounts/wakeups/${id}`, body('DELETE')),
+  codexStatus: (id: number) => request<CodexAccountStatus>(`/admin/api/v1/accounts/${id}/codex-status`),
+  resetCodexQuota: (id: number, creditId: string) => request<{ windowsReset: number }>(`/admin/api/v1/accounts/${id}/codex-status/reset`, body('POST', { creditId })),
+  accountCredits: (id: number) => request<{ available: boolean; credits?: number }>(`/admin/api/v1/accounts/${id}/credits`, body('POST')),
 
   statsOverview: (): Promise<StatsOverview> => request('/admin/api/v1/stats/overview'),
 

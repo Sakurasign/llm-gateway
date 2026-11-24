@@ -53,8 +53,9 @@ public class UsageConsumer {
                   (request_id, tenant_id, api_key_id, virtual_model, upstream_model, channel_id, channel_name,
                    protocol_in, protocol_out, gateway_stream, status_code, error_code,
                    input_tokens, output_tokens, cached_tokens, reasoning_tokens, usage_source, cost_micro,
-                   ttft_ms, total_ms, retry_count, sticky_hit, route_trace, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ttft_ms, total_ms, retry_count, sticky_hit, route_trace, created_at,
+                   account_id, group_id, inbound_endpoint, upstream_endpoint, reasoning_effort, billing_mode, cache_creation_tokens, uncached_input_tokens, account_cost_micro)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """;
         try {
             jdbc.update(sql,
@@ -63,7 +64,8 @@ public class UsageConsumer {
                     e.statusCode(), e.errorCode(), e.inputTokens(), e.outputTokens(),
                     e.cachedTokens(), e.reasoningTokens(), e.usageSource(), e.costMicro(),
                     e.ttftMs(), e.totalMs(), e.retryCount(), e.stickyHit(), e.routeTrace(),
-                    new java.sql.Timestamp(e.createdAt()));
+                    new java.sql.Timestamp(e.createdAt()), e.accountId(), e.groupId(), e.inboundEndpoint(), e.upstreamEndpoint(),
+                    e.reasoningEffort(), e.billingMode(), e.cacheCreationTokens(), e.uncachedInputTokens(), e.accountCostMicro());
             return true;
         } catch (org.springframework.dao.DuplicateKeyException dup) {
             // 重复投递，跳过（幂等）

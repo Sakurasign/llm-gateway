@@ -11,20 +11,26 @@ import './style.css'
 
 import Login from './views/Login.vue'
 import Dashboard from './views/Dashboard.vue'
-import Channels from './views/Channels.vue'
+import Groups from './views/Groups.vue'
+import IpManagement from './views/IpManagement.vue'
+import Accounts from './views/Accounts.vue'
 import Models from './views/Models.vue'
 import Logs from './views/Logs.vue'
-import Playground from './views/Playground.vue'
+import Keys from './views/Keys.vue'
 import { getToken } from './api/client'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: Login, meta: { public: true } },
   { path: '/', redirect: '/dashboard' },
   { path: '/dashboard', component: Dashboard },
-  { path: '/channels', component: Channels },
+  { path: '/channels', redirect: '/accounts' },
+  { path: '/groups', component: Groups },
+  { path: '/ips', component: IpManagement },
+  { path: '/accounts', component: Accounts },
   { path: '/models', component: Models },
   { path: '/logs', component: Logs },
-  { path: '/playground', component: Playground }
+  { path: '/keys', component: Keys },
+  { path: '/playground', redirect: '/dashboard' }
 ]
 
 const router = createRouter({

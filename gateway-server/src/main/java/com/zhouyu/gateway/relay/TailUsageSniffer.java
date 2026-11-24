@@ -32,10 +32,93 @@ public final class TailUsageSniffer {
     private final ObjectMapper mapper;
     private final StringBuilder tail = new StringBuilder();
     private int inputTokens;
+    private int cacheCreationTokens;
+    private int reasoningTokens;
+    private boolean inputIncludesCache;
+    private long firstOutputAt;
+    private String upstreamEndpoint;
+
+    public void upstreamEndpoint(String path) { upstreamEndpoint = path.split("\\?", 2)[0].replaceFirst("^https?://[^/]+", ""); }
+    public String upstreamEndpoint() { return upstreamEndpoint; }
+    public void markOutput() { if (firstOutputAt == 0) firstOutputAt = System.currentTimeMillis(); }
+    public int ttftMs(long startedAt) { return firstOutputAt == 0 ? 0 : (int) Math.max(1, firstOutputAt - startedAt); }
+    public int cacheCreationTokens() { return cacheCreationTokens; }
+    public int reasoningTokens() { return reasoningTokens; }
+    public int uncachedInputTokens() { return Math.max(0, inputTokens - (inputIncludesCache ? cachedTokens : 0)); }
+
+    public void parseUsage(JsonNode usage) {
+        if (!usage.isObject()) return;
+        usageSource = "UPSTREAM";
+        if (usage.has("input_tokens")) inputTokens = usage.path("input_tokens").asInt();
+        if (usage.has("prompt_tokens")) inputTokens = usage.path("prompt_tokens").asInt();
+        if (usage.has("output_tokens")) outputTokens = usage.path("output_tokens").asInt();
+        if (usage.has("completion_tokens")) outputTokens = usage.path("completion_tokens").asInt();
+        if (usage.has("input_tokens_details") || usage.has("prompt_tokens_details") || usage.has("prompt_tokens")) {
+            inputIncludesCache = true;
+            cachedTokens = usage.path("input_tokens_details").path("cached_tokens").asInt(
+                    usage.path("prompt_tokens_details").path("cached_tokens").asInt());
+        }
+        if (usage.has("cache_read_input_tokens")) cachedTokens = usage.path("cache_read_input_tokens").asInt();
+        if (usage.has("cache_creation_input_tokens")) cacheCreationTokens = usage.path("cache_creation_input_tokens").asInt();
+        reasoningTokens = usage.path("output_tokens_details").path("reasoning_tokens").asInt(
+                usage.path("completion_tokens_details").path("reasoning_tokens").asInt(reasoningTokens));
+    }
     private int outputTokens;
     private int cachedTokens;
     private String usageSource = "ESTIMATED";
     private long totalBytes;
+    private String responseId;
+    private String responseStatus;
+    private final java.io.ByteArrayOutputStream responseLine = new java.io.ByteArrayOutputStream();
+    private boolean skipResponseLine;
+
+    public void acceptResponses(DataBuffer buffer) {
+        totalBytes += buffer.readableByteCount();
+        // Read only a copy of the view, leaving the buffer position intact for relay.
+        try (var buffers = buffer.readableByteBuffers()) {
+            while (buffers.hasNext()) {
+                var view = buffers.next().asReadOnlyBuffer();
+                while (view.hasRemaining()) {
+                    byte b = view.get();
+                    if (b == '\n') {
+                        if (!skipResponseLine) parseResponseLine();
+                        responseLine.reset();
+                        skipResponseLine = false;
+                    } else if (responseLine.size() == 2 * 1024 * 1024) {
+                        skipResponseLine = true;
+                    } else if (!skipResponseLine) {
+                        responseLine.write(b);
+                    }
+                }
+            }
+        }
+    }
+
+    private void parseResponseLine() {
+        String line = responseLine.toString(StandardCharsets.UTF_8);
+        if (!line.startsWith("data:")) return;
+        try {
+            JsonNode event = mapper.readTree(line.substring(5));
+            JsonNode response = event.path("response");
+            if (response.isObject()) parseResponse(response);
+            parseUsage(event.path("message").path("usage"));
+            parseUsage(event.path("usage"));
+            if (event.path("type").asText().equals("error")) responseStatus = "failed";
+        } catch (Exception ignored) { }
+    }
+
+    private void parseResponse(JsonNode response) {
+        if (!response.path("object").asText().equals("response")) return;
+        if (response.hasNonNull("id")) responseId = response.get("id").asText();
+        if (response.hasNonNull("status")) responseStatus = response.get("status").asText();
+        JsonNode usage = response.path("usage");
+        parseUsage(usage);
+        if (usage.isObject()) inputIncludesCache = true;
+    }
+
+    public String responseId() { return responseId; }
+    public String responseStatus() { return responseStatus; }
+    public void responseStatus(String status) { responseStatus = status; }
 
     public TailUsageSniffer(ObjectMapper mapper) {
         this.mapper = mapper;
@@ -55,6 +138,15 @@ public final class TailUsageSniffer {
             }
         }
         parseChunk(s);
+    }
+
+    public void finishChatStream() {
+        // 最后的 usage 帧可能被拆到多个网络分片。
+        synchronized (tail) {
+            for (String line : tail.toString().split("\\R")) {
+                if (line.startsWith("data:")) parseWhole(line.substring(5).trim().getBytes(StandardCharsets.UTF_8));
+            }
+        }
     }
 
     private void parseChunk(String chunk) {
@@ -97,25 +189,21 @@ public final class TailUsageSniffer {
         try {
             JsonNode root = mapper.readTree(body);
 
-            // Anthropic 格式（转换后的响应）
-            JsonNode usage = root.get("usage");
-            if (usage != null) {
-                usageSource = "UPSTREAM";
-                if (usage.has("input_tokens")) inputTokens = usage.get("input_tokens").asInt();
-                if (usage.has("output_tokens")) outputTokens = usage.get("output_tokens").asInt();
-                if (usage.has("prompt_tokens")) inputTokens = usage.get("prompt_tokens").asInt();
-                if (usage.has("completion_tokens")) outputTokens = usage.get("completion_tokens").asInt();
-                if (usage.has("cache_read_input_tokens")) cachedTokens = usage.get("cache_read_input_tokens").asInt();
+            if (root.path("object").asText().equals("response")) {
+                parseResponse(root);
                 return;
             }
 
-            // Gemini 原始格式（未经过非流式转换时）
+            // Anthropic 格式（转换后的响应）
+            parseUsage(root.path("usage"));
+
             JsonNode usageMeta = root.get("usageMetadata");
             if (usageMeta != null) {
                 usageSource = "UPSTREAM";
                 inputTokens = usageMeta.path("promptTokenCount").asInt(0);
                 outputTokens = usageMeta.path("candidatesTokenCount").asInt(0);
                 cachedTokens = usageMeta.path("cachedContentTokenCount").asInt(0);
+                inputIncludesCache = true;
             }
         } catch (Exception ignored) {
             // 保持 ESTIMATED
@@ -138,6 +226,7 @@ public final class TailUsageSniffer {
                 this.inputTokens = Math.max(this.inputTokens, u.inputTokens());
                 this.outputTokens = Math.max(this.outputTokens, u.outputTokens());
                 this.cachedTokens = Math.max(this.cachedTokens, u.cachedTokens());
+                this.reasoningTokens = Math.max(this.reasoningTokens, u.reasoningTokens());
                 this.usageSource = "UPSTREAM";
             }
         } else if (chunk instanceof com.zhouyu.gateway.protocol.canonical.CanonicalChunk.TextDelta t) {

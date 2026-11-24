@@ -1,85 +1,86 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { api } from '../api/client'
-import type { VirtualModelInfo } from '../api/types'
+import { protocols } from '../api/protocols'
+import type { ChannelInfo, ModelRouteInfo, RoutePayload, VirtualModelInfo } from '../api/types'
 
-const models = ref<VirtualModelInfo[]>([])
+const rows = ref<VirtualModelInfo[]>([])
+const channels = ref<ChannelInfo[]>([])
+const version = ref(0)
 const loading = ref(true)
-const err = ref('')
+const saving = ref(false)
+const error = ref('')
+const search = ref('')
+const dialog = ref(false)
+const id = ref<number>()
+const form = ref<Omit<RoutePayload, 'channelId'> & { channelId?: number }>({ virtualModel: '', upstreamModel: '', weight: 100, priceRatio: 1 })
+const filtered = computed(() => rows.value.flatMap(model => model.routes.map(route => ({ ...route, virtualModel: model.name })))
+  .filter(route => [route.virtualModel, route.upstreamModel, route.channelName].some(value => value.toLowerCase().includes(search.value.trim().toLowerCase()))))
 
-async function load(): Promise<void> {
+async function load() {
   loading.value = true
-  err.value = ''
+  error.value = ''
   try {
-    const res = await api.models()
-    models.value = res.data ?? []
-  } catch (e) {
-    err.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    loading.value = false
-  }
+    const [models, upstreams] = await Promise.all([api.models(), api.channels()])
+    rows.value = models.data
+    channels.value = upstreams.data
+    version.value = models.version
+  } catch (e) { error.value = (e as Error).message }
+  finally { loading.value = false }
 }
-
-function protocolTag(p: string): 'primary' | 'success' | 'warning' | 'info' {
-  switch (p) {
-    case 'ANTHROPIC':
-      return 'primary'
-    case 'OPENAI_CHAT':
-      return 'success'
-    case 'GEMINI':
-      return 'warning'
-    default:
-      return 'info'
-  }
+function edit(route?: ModelRouteInfo & {virtualModel:string}) {
+  id.value = route?.id
+  form.value = route ? { virtualModel: route.virtualModel, upstreamModel: route.upstreamModel, channelId: route.channelId,
+    weight: route.weight, priceRatio: route.priceRatio } : { virtualModel: '', upstreamModel: '', weight: 100, priceRatio: 1 }
+  dialog.value = true
 }
-
-onMounted(() => void load())
+async function save() {
+  const channelId = form.value.channelId
+  if (channelId === undefined || !form.value.virtualModel.trim() || !form.value.upstreamModel.trim() || saving.value) return
+  saving.value = true
+  try { await api.saveRoute(version.value, { ...form.value, channelId }, id.value); ElMessage.success('模型绑定已发布'); dialog.value = false; await load() }
+  catch (e) { ElMessage.error((e as Error).message) }
+  finally { saving.value = false }
+}
+async function remove(route: ModelRouteInfo) {
+  try { await ElMessageBox.confirm(`解除「${route.upstreamModel}」的模型绑定？`, '移除绑定', { type: 'warning' }) }
+  catch { return }
+  try { await api.deleteRoute(version.value, route.id); ElMessage.success('模型绑定已移除'); await load() }
+  catch (e) { ElMessage.error((e as Error).message) }
+}
+onMounted(load)
 </script>
 
 <template>
-  <h1>模型路由</h1>
-
-  <div class="toolbar">
-    <el-button :icon="Refresh" @click="load">刷新</el-button>
-    <span class="dim">{{ models.length }} 个虚拟模型</span>
-  </div>
-
-  <el-alert v-if="err" :title="err" type="error" :closable="false" style="margin-bottom: 14px" />
-
-  <el-card
-    v-for="m in models"
-    :key="m.name"
-    shadow="never"
-    style="margin-bottom: 16px"
-  >
-    <template #header>
-      <div style="display: flex; align-items: center; gap: 10px">
-        <span class="mono" style="font-weight: 600">{{ m.name }}</span>
-        <el-tag size="small" type="info">{{ m.routes.length }} 条路由</el-tag>
-      </div>
-    </template>
-
-    <el-table :data="m.routes" size="small" stripe>
-      <el-table-column prop="priority" label="优先级" width="90" align="center" />
-      <el-table-column prop="channelName" label="渠道" min-width="150">
-        <template #default="{ row }">
-          <span class="mono">{{ row.channelName }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="upstreamModel" label="上游模型" min-width="200">
-        <template #default="{ row }">
-          <span class="mono dim">{{ row.upstreamModel }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="协议" width="150">
-        <template #default="{ row }">
-          <el-tag :type="protocolTag(row.protocol)" size="small">{{ row.protocol }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="weight" label="权重" width="90" align="center" />
-    </el-table>
-  </el-card>
-
-  <el-empty v-if="!models.length && !loading" description="暂无模型" />
+  <section class="workspace-page" aria-labelledby="models-heading">
+    <div class="page-heading">
+      <div><h1 id="models-heading">通用渠道模型</h1><p>账号专用的模型映射在账号管理中编辑。</p></div>
+      <el-button type="primary" :icon="Plus" :disabled="!channels.length" @click="edit()">新增绑定</el-button>
+    </div>
+    <el-alert v-if="error" :title="error" type="error" :closable="false" class="page-error" />
+    <div class="panel">
+      <div class="panel-head"><div><h2>模型绑定</h2><span class="dim">{{ filtered.length }} 条 · v{{ version }}</span></div><el-button class="icon-action" :icon="Refresh" aria-label="刷新模型" @click="load" /></div>
+      <div class="filter-bar"><el-input v-model="search" placeholder="搜索模型或渠道" :prefix-icon="Search" clearable aria-label="搜索模型" /></div>
+      <p class="table-scroll-hint">横向滑动可查看状态和操作</p>
+      <el-table v-loading="loading" :data="filtered" empty-text="没有匹配的模型绑定">
+        <el-table-column prop="virtualModel" label="客户端模型" min-width="155" />
+        <el-table-column prop="upstreamModel" label="上游模型" min-width="155" />
+        <el-table-column label="渠道" min-width="148"><template #default="{ row }">{{ row.channelName }}<span class="dim model-protocol">{{ protocols[row.protocol as keyof typeof protocols]?.name }}</span></template></el-table-column>
+        <el-table-column prop="weight" label="权重" width="72" />
+        <el-table-column label="状态" width="92"><template #default="{ row }"><span class="state-label" :class="{ enabled: row.enabled }"><i />{{ row.enabled ? '已启用' : '已停用' }}</span></template></el-table-column>
+        <el-table-column label="操作" width="115"><template #default="{ row }"><el-button link type="primary" @click="edit(row)">编辑</el-button><el-button link type="danger" @click="remove(row)">移除</el-button></template></el-table-column>
+      </el-table>
+    </div>
+    <el-dialog v-model="dialog" :title="id ? '编辑模型绑定' : '新增模型绑定'" width="min(520px, 94vw)" destroy-on-close>
+      <el-form label-position="top" @submit.prevent="save">
+        <el-form-item label="客户端模型名称" required><el-input v-model="form.virtualModel" maxlength="64" placeholder="例如 gpt-work" /></el-form-item>
+        <el-form-item label="上游渠道" required><el-select v-model="form.channelId" placeholder="选择上游渠道"><el-option v-for="row in channels" :key="row.id" :label="row.name" :value="row.id" /></el-select></el-form-item>
+        <el-form-item label="上游模型 ID" required><el-input v-model="form.upstreamModel" maxlength="128" placeholder="填写提供方实际支持的型号" /></el-form-item>
+        <div class="form-grid"><el-form-item label="权重"><el-input-number v-model="form.weight" :min="1" /></el-form-item><el-form-item label="价格倍率"><el-input-number v-model="form.priceRatio" :min="0.01" :step="0.05" /></el-form-item></div>
+      </el-form>
+      <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!form.virtualModel.trim() || !form.upstreamModel.trim() || !form.channelId" @click="save">保存并发布</el-button></template>
+    </el-dialog>
+  </section>
 </template>

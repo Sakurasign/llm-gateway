@@ -4,10 +4,10 @@ export type ThemeMode = 'dark' | 'light'
 
 const STORAGE_KEY = 'gw_theme'
 
-/** 从 localStorage 读初始主题，缺省用深色（原设计）。 */
+/** 从 localStorage 读初始主题，缺省用浅色。 */
 function initial(): ThemeMode {
   const saved = localStorage.getItem(STORAGE_KEY)
-  return saved === 'light' ? 'light' : 'dark'
+  return saved === 'dark' ? 'dark' : 'light'
 }
 
 const mode = ref<ThemeMode>(initial())

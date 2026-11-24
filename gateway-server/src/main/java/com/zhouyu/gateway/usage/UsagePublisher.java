@@ -28,13 +28,28 @@ public class UsagePublisher {
     private static final int BUFFER_LIMIT = 20_000;
 
     private final ObjectProvider<RabbitTemplate> templateProvider;
+    private final UsageConsumer consumer;
     private final ConcurrentLinkedQueue<UsageEvent> buffer = new ConcurrentLinkedQueue<>();
     private final AtomicLong published = new AtomicLong();
     private final AtomicLong buffered = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
 
-    public UsagePublisher(ObjectProvider<RabbitTemplate> templateProvider) {
+    public UsagePublisher(ObjectProvider<RabbitTemplate> templateProvider, UsageConsumer consumer) {
         this.templateProvider = templateProvider;
+        this.consumer = consumer;
+    }
+
+    public void publish(UsageEvent event, boolean managed) {
+        if (managed) {
+            try {
+                consumer.persist(event);
+                consumer.bill(event);
+                return;
+            } catch (org.springframework.dao.DataAccessException error) {
+                log.warn("密钥用量落库失败，转入用量队列 requestId={}", event.requestId());
+            }
+        }
+        publish(event);
     }
 
     public void publish(UsageEvent event) {

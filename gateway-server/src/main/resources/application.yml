@@ -1,5 +1,6 @@
 server:
   port: ${SERVER_PORT:18081}
+  forward-headers-strategy: none
   netty:
     connection-timeout: 5s
 
@@ -181,7 +182,7 @@ gateway:
   keys:
     - id: 1001
       # 演示用客户端 Key；生产应从数据库加载，且只存哈希
-      secret: ${DEMO_API_KEY:sk-lg-demo-key-local}
+      secret: ${DEMO_API_KEY:}
       tenant-id: 1
       group-id: 1
       balance-micro: 100000000   # 100 USD

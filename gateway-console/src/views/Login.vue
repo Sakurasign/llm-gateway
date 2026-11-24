@@ -31,7 +31,7 @@ async function submit(): Promise<void> {
 
 <template>
   <div class="login-box">
-    <h1>LLM Gateway 控制台</h1>
+    <h1>Sakura Gateway 控制台</h1>
 
     <el-input
       v-model="username"

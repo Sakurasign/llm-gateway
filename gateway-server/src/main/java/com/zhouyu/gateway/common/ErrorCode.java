@@ -6,10 +6,12 @@ package com.zhouyu.gateway.common;
 public enum ErrorCode {
 
     INVALID_API_KEY(401, "invalid_request_error", "invalid_api_key", "API key 无效或已禁用"),
+    IP_RESTRICTED(403, "permission_error", "ip_restricted", "当前 IP 无权使用此 API Key"),
     INSUFFICIENT_QUOTA(402, "insufficient_quota", "insufficient_quota", "余额或额度不足"),
     MODEL_NOT_FOUND(404, "invalid_request_error", "model_not_found", "模型不存在或无可用渠道"),
     INVALID_REQUEST(400, "invalid_request_error", "invalid_request", "请求参数不合法"),
     CONTEXT_LENGTH_EXCEEDED(400, "invalid_request_error", "context_length_exceeded", "超出模型上下文长度"),
+    KEY_RATE_LIMITED(429, "rate_limit_error", "key_rate_limited", "API Key 请求频率已达上限"),
     UPSTREAM_RATE_LIMITED(429, "rate_limit_error", "upstream_rate_limited", "上游限流"),
     UPSTREAM_UNAVAILABLE(503, "server_error", "upstream_unavailable", "上游不可用"),
     UPSTREAM_TIMEOUT(504, "server_error", "upstream_timeout", "上游超时"),

@@ -35,7 +35,14 @@ public record UsageEvent(
         int retryCount,
         boolean stickyHit,
         String routeTrace,
-        long createdAt
+        long createdAt,
+        Long accountId, Long groupId, String inboundEndpoint, String upstreamEndpoint,
+        String reasoningEffort, String billingMode, Integer cacheCreationTokens, Integer uncachedInputTokens, Long accountCostMicro
 ) {
+    public static String reasoningEffort(com.fasterxml.jackson.databind.JsonNode body) {
+        String value = body.path("reasoning").path("effort").asText(
+                body.path("reasoning_effort").asText(body.path("output_config").path("effort").asText("")));
+        return value.matches("[a-zA-Z0-9_-]{1,32}") ? value : null;
+    }
 }
 

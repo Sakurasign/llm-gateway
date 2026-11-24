@@ -1,7 +1,11 @@
 package com.zhouyu.gateway.protocol.anthropic;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zhouyu.gateway.accounts.AccountAuthorization;
+import com.zhouyu.gateway.accounts.AccountPool;
 import com.zhouyu.gateway.auth.ApiKeyAuthenticator;
+import com.zhouyu.gateway.usage.UsageEvent;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.zhouyu.gateway.billing.CostCalculator;
 import com.zhouyu.gateway.billing.MultimodalUsageExtractor;
 import com.zhouyu.gateway.billing.PriceRule;
@@ -9,6 +13,7 @@ import com.zhouyu.gateway.billing.PricingService;
 import com.zhouyu.gateway.common.ErrorCode;
 import com.zhouyu.gateway.common.GatewayException;
 import com.zhouyu.gateway.domain.ApiKeyView;
+import com.zhouyu.gateway.domain.Channel;
 import com.zhouyu.gateway.domain.Protocol;
 import com.zhouyu.gateway.protocol.canonical.CanonicalRequest;
 import com.zhouyu.gateway.protocol.gemini.GeminiRequestBuilder;
@@ -21,6 +26,7 @@ import com.zhouyu.gateway.quota.QuotaService;
 import com.zhouyu.gateway.relay.RequestRewriter;
 import com.zhouyu.gateway.relay.TailUsageSniffer;
 import com.zhouyu.gateway.relay.UpstreamRelay;
+import com.zhouyu.gateway.routing.AccountRouting;
 import com.zhouyu.gateway.routing.CircuitBreaker;
 import com.zhouyu.gateway.routing.DynamicWeightManager;
 import com.zhouyu.gateway.routing.RouteResolver;
@@ -35,9 +41,12 @@ import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -55,6 +64,8 @@ public class AnthropicController {
     private static final Logger log = LoggerFactory.getLogger(AnthropicController.class);
 
     private final ApiKeyAuthenticator auth;
+    private final AccountPool accounts;
+    private final AccountRouting accountRouting;
     private final RouteTableHolder tables;
     private final RouteResolver resolver;
     private final QuotaService quota;
@@ -76,6 +87,8 @@ public class AnthropicController {
     private final MultimodalUsageExtractor multimodalExtractor;
 
     public AnthropicController(ApiKeyAuthenticator auth,
+                               AccountPool accounts,
+                               AccountRouting accountRouting,
                                RouteTableHolder tables,
                                RouteResolver resolver,
                                QuotaService quota,
@@ -96,6 +109,8 @@ public class AnthropicController {
                                DynamicWeightManager dynamicWeight,
                                MultimodalUsageExtractor multimodalExtractor) {
         this.auth = auth;
+        this.accounts = accounts;
+        this.accountRouting = accountRouting;
         this.tables = tables;
         this.resolver = resolver;
         this.quota = quota;
@@ -186,7 +201,12 @@ public class AnthropicController {
                     new GatewayException(ErrorCode.MODEL_NOT_FOUND, "当前 Key 无权访问模型 " + virtualModel), mapper);
         }
 
-        List<RouteTable.Candidate> candidates = tables.table().candidates(virtualModel);
+        var table = tables.table();
+        List<RouteTable.Candidate> candidates = table.candidates(virtualModel, key).stream()
+                .filter(candidate -> switch (candidate.channel().protocol()) {
+                    case ANTHROPIC, OPENAI_CHAT, GEMINI -> true;
+                    default -> false;
+                }).toList();
         if (candidates.isEmpty()) {
             return ErrorResponses.write(response,
                     new GatewayException(ErrorCode.MODEL_NOT_FOUND, "模型 " + virtualModel + " 未配置渠道"), mapper);
@@ -199,9 +219,11 @@ public class AnthropicController {
         long estimateMicro = costCalculator.estimateReserveMicro(priceRule, estInput, maxTokens);
 
         // 会话标识在入口处解析一次，贯穿整条链路（重试时不再变化）
-        String sessionKey = sessionKeyExtractor.extract(request, body);
+        long start = System.currentTimeMillis();
+        String sessionKey = key.accountGroup() == null ? sessionKeyExtractor.extract(request, body) : null;
 
-        return quota.reserve(key.tenantId(), key.id(), requestId, estimateMicro)
+        Mono<Void> checkSpend = key.spendLimits().enabled() ? auth.checkSpend(key) : Mono.empty();
+        return checkSpend.then(Mono.defer(() -> quota.reserve(key.tenantId(), key.id(), requestId, estimateMicro)))
                 .flatMap(result -> {
                     if (result == QuotaService.ReserveResult.INSUFFICIENT) {
                         metrics.quotaRejected();
@@ -210,9 +232,9 @@ public class AnthropicController {
                     }
                     // OK / DUPLICATE / DEGRADED 均放行：
                     // DEGRADED 表示配额服务不可用，按 FAIL_OPEN 策略放行并照常记账
+                    var plan = accountRouting.plan(table, key, virtualModel, candidates, request, body);
                     return attempt(requestId, key, request, response, body, virtualModel, stream,
-                            new ArrayList<>(candidates), new UpstreamRelay.FirstByteFlag(),
-                            sessionKey, true);
+                            plan.candidates(), new UpstreamRelay.FirstByteFlag(), sessionKey, plan.session(), true, mapper.createArrayNode(), start);
                 })
                 .onErrorResume(e -> {
                     quota.release(key.tenantId(), requestId).onErrorResume(x -> Mono.empty()).subscribe();
@@ -235,20 +257,22 @@ public class AnthropicController {
                                byte[] body, String virtualModel, boolean stream,
                                List<RouteTable.Candidate> remaining,
                                UpstreamRelay.FirstByteFlag firstByte,
-                               String sessionKey, boolean firstAttempt) {
+                               String sessionKey, AccountRouting.Session accountSession, boolean firstAttempt, ArrayNode trace, long start) {
 
+        boolean ordered = key.accountGroup() != null;
         RouteResolver.Decision decision;
         List<RouteTable.Candidate> rest;
         try {
             java.util.Optional<Long> stickyChannel = java.util.Optional.empty();
-            if (firstAttempt && sessionKey != null) {
+            if (!ordered && firstAttempt && sessionKey != null) {
                 // 同步读本地缓存（命中时零网络往返），未命中退化为轮询
                 Long bound = stickyStore.peekLocal(key.tenantId(), virtualModel, sessionKey);
                 if (bound != null) {
                     stickyChannel = java.util.Optional.of(bound);
                 }
             }
-            decision = resolver.resolve(virtualModel, remaining, Protocol.ANTHROPIC, stickyChannel);
+            decision = ordered ? resolver.resolveOrdered(virtualModel, remaining)
+                    : resolver.resolve(virtualModel, remaining, Protocol.ANTHROPIC, stickyChannel);
             rest = new ArrayList<>(remaining);
             rest.remove(decision.selected());
         } catch (GatewayException e) {
@@ -257,8 +281,9 @@ public class AnthropicController {
 
         var channel = decision.selected().channel();
         String upstreamModel = decision.selected().route().upstreamModel();
+        Long accountId = decision.selected().route().accountId();
+        boolean managed = channel.protocol() == Protocol.ANTHROPIC && accountId != null;
         TailUsageSniffer meter = new TailUsageSniffer(mapper);
-        long start = System.currentTimeMillis();
 
         Mono<Void> pipeline;
         if (channel.protocol() == Protocol.GEMINI) {
@@ -302,51 +327,100 @@ public class AnthropicController {
         } else {
             // 快车道：同协议透传
             byte[] rewritten = rewriter.rewriteModel(body, upstreamModel);
-            pipeline = relay.relay(request, response, channel, "/v1/messages", rewritten, stream, firstByte, meter);
+            pipeline = managed ? relayAccount(request, response, channel, accountId, upstreamModel, rewritten, stream, firstByte, meter)
+                    : relay.relay(request, response, channel, "/v1/messages", rewritten, stream, firstByte, meter);
         }
 
-        return pipeline
+        var step = trace.addObject().put("channel", channel.name());
+        if (accountId != null) step.put("accountId", accountId);
+        if (decision.selected().groupId() != null) step.put("groupId", decision.selected().groupId());
+        return pipeline.then(Mono.<Void>defer(() -> "failed".equals(meter.responseStatus())
+                        ? Mono.error(new UpstreamRelay.UpstreamError(502, "上游流未正常结束")) : Mono.empty()))
                 .doOnSuccess(v -> {
                     breaker.recordSuccess(channel.id(), upstreamModel);
                     dynamicWeight.recordSuccess(channel.id(), upstreamModel);
+                    accountRouting.remember(accountSession, accountId);
                     if (decision.stickyHit()) {
                         metrics.stickyHit();
                     }
                     // 成功后才绑定亲和：失败/熔断的渠道不应被钉住
-                    if (sessionKey != null) {
+                    if (!ordered && sessionKey != null) {
                         stickyStore.bind(key.tenantId(), virtualModel, sessionKey, channel.id())
                                 .subscribe(
                                         null,
                                         e -> log.debug("sticky bind 失败: {}", e.toString()));
                     }
-                    settle(requestId, key, meter, start, channel.name(), virtualModel, decision, body);
+                    step.put("status", 200);
+                    settle(requestId, key, meter, start, channel.name(), virtualModel, decision, body,
+                            request.getPath().value(), stream, trace);
                 })
                 .onErrorResume(e -> {
-                    if (firstByte.isSet()) {
+                    int failStatus = e instanceof UpstreamRelay.UpstreamError upstream ? upstream.status() : mapError(e).errorCode().httpStatus();
+                    step.put("status", failStatus);
+                    if (firstByte.isSet() || response.isCommitted()) {
                         log.warn("request={} 已写出首字节后失败，终止不重试: {}", requestId, e.toString());
                         breaker.recordFailure(channel.id(), upstreamModel);
                         dynamicWeight.recordFailure(channel.id(), upstreamModel, true);
+                        publishUsage(requestId, key, meter, start, virtualModel, decision, body,
+                                request.getPath().value(), stream, trace, failStatus, 0, null);
+                        quota.release(key.tenantId(), requestId).onErrorResume(error -> Mono.empty()).subscribe();
                         return Mono.empty();
                     }
-                    boolean retryable = (e instanceof UpstreamRelay.UpstreamError ue) && ue.retryable();
-                    int failStatus = (e instanceof UpstreamRelay.UpstreamError ue2) ? ue2.status() : 0;
+                    boolean retryable = e instanceof UpstreamRelay.UpstreamError upstream && upstream.retryable();
+                    if (ordered && managed) {
+                        retryable |= AccountRouting.accountRejected(failStatus)
+                                || e instanceof GatewayException unavailable && unavailable.errorCode() == ErrorCode.UPSTREAM_UNAVAILABLE;
+                    }
                     // 429 属于限流而非渠道故障，只轻微惩罚；5xx / 连接失败为严重失败
                     dynamicWeight.recordFailure(channel.id(), upstreamModel, failStatus == 0 || failStatus >= 500);
                     breaker.recordFailure(channel.id(), upstreamModel);
                     if (!retryable || rest.isEmpty()) {
+                        publishUsage(requestId, key, meter, start, virtualModel, decision, body,
+                                request.getPath().value(), stream, trace, failStatus, 0, null);
                         return Mono.error(e);
                     }
                     log.warn("request={} channel={} 失败，切换下一候选（剩余 {}）",
                             requestId, channel.name(), rest.size());
                     return attempt(requestId, key, request, response, body, virtualModel, stream,
-                            rest, firstByte, sessionKey, false);
+                            rest, firstByte, sessionKey, accountSession, false, trace, start);
                 })
                 .doFinally(sig -> resolver.release(decision));
     }
 
+    private Mono<Void> relayAccount(ServerHttpRequest request, ServerHttpResponse response, Channel channel,
+                                    long accountId, String model, byte[] body, boolean stream,
+                                    UpstreamRelay.FirstByteFlag firstByte, TailUsageSniffer meter) {
+        return Mono.fromCallable(() -> accounts.acquireForAccount(AccountPool.ANTHROPIC, accountId, model, Set.of()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMap(lease -> {
+                    var authenticated = new Channel(channel.id(), channel.name(), channel.protocol(), channel.baseUrl(),
+                            lease.credential().path("api_key").asText(), channel.priority(), channel.weight(), channel.maxInflight(),
+                            channel.timeout(), channel.passthrough(), channel.enabled(), false, lease.proxy());
+                    return Mono.defer(() -> "oauth".equals(lease.realm())
+                                    ? relay.relay(request, response, authenticated, "/v1/messages", body, stream, firstByte, meter,
+                                            AccountAuthorization.claudeOAuthHeaders(lease.credential()))
+                                    : relay.relay(request, response, authenticated, "/v1/messages", body, stream, firstByte, meter))
+                            .then(Mono.defer(() -> recordAccount(lease, model, "failed".equals(meter.responseStatus()) ? 502 : 200, 0, meter)))
+                            .onErrorResume(UpstreamRelay.UpstreamError.class, error ->
+                                    recordAccount(lease, model, error.status(), error.retryAt(Instant.now().getEpochSecond()), meter)
+                                            .then(Mono.error(error)))
+                            .doFinally(signal -> lease.close());
+                })
+                .doOnDiscard(AccountPool.Lease.class, AccountPool.Lease::close);
+    }
+
+    private Mono<Void> recordAccount(AccountPool.Lease lease, String model, int status, long retryAt, TailUsageSniffer meter) {
+        return Mono.<Void>fromRunnable(() -> accounts.result(lease, model, status, meter.inputTokens(), meter.outputTokens(), false, retryAt))
+                .subscribeOn(Schedulers.boundedElastic())
+                .onErrorResume(error -> {
+                    log.warn("Failed to record Claude account result for account {}", lease.id(), error);
+                    return Mono.empty();
+                });
+    }
+
     private void settle(String requestId, ApiKeyView key, TailUsageSniffer meter,
                         long start, String channelName, String virtualModel,
-                        RouteResolver.Decision decision, byte[] requestBody) {
+                        RouteResolver.Decision decision, byte[] requestBody, String inboundEndpoint, boolean stream, ArrayNode trace) {
         int in = meter.inputTokens();
         int out = meter.outputTokens();
         int cached = meter.cachedTokens();
@@ -371,21 +445,28 @@ public class AnthropicController {
         metrics.recordTokens(in, out);
         metrics.recordAddedLatency(java.time.Duration.ofMillis(elapsed));
 
-        var ch = decision.selected().channel();
-        String routeTraceJson;
-        try {
-            routeTraceJson = mapper.writeValueAsString(decision.toTrace());
-        } catch (Exception ex) {
-            // trace 只是诊断信息，序列化失败不能影响主链路
-            routeTraceJson = null;
-        }
-        usagePublisher.publish(new com.zhouyu.gateway.usage.UsageEvent(
-                requestId, key.tenantId(), key.id(), virtualModel,
-                decision.selected().route().upstreamModel(), ch.id(), ch.name(),
-                "ANTHROPIC", ch.protocol().name(), true, 200, null,
-                in, out, meter.cachedTokens(), 0, meter.usageSource(), actualMicro,
-                0, (int) elapsed, 0, false,
-                routeTraceJson, System.currentTimeMillis()));
+        publishUsage(requestId, key, meter, start, virtualModel, decision, requestBody, inboundEndpoint,
+                stream, trace, 200, actualMicro, cost.accountMicroUsd());
+    }
+
+    private void publishUsage(String requestId, ApiKeyView key, TailUsageSniffer meter, long start, String model,
+                              RouteResolver.Decision decision, byte[] body, String inboundEndpoint, boolean stream,
+                              ArrayNode trace, int status, long cost, Long accountCost) {
+        var candidate = decision.selected();
+        var channel = candidate.channel();
+        String effort = null;
+        try { effort = UsageEvent.reasoningEffort(mapper.readTree(body)); }
+        catch (java.io.IOException ignored) { }
+        var event = new UsageEvent(requestId, key.tenantId(), key.id(), model,
+                candidate.route().upstreamModel(), channel.id(), channel.name(),
+                "ANTHROPIC", channel.protocol().name(), stream, status, status >= 400 ? "upstream_error" : null,
+                meter.inputTokens(), meter.outputTokens(), meter.cachedTokens(), meter.reasoningTokens(), meter.usageSource(), cost,
+                stream ? meter.ttftMs(start) : 0, (int) (System.currentTimeMillis() - start), Math.min(127, trace.size() - 1),
+                decision.stickyHit(), trace.toString(), System.currentTimeMillis(), candidate.route().accountId(),
+                candidate.groupId() == null ? key.groupId() : candidate.groupId(), inboundEndpoint, meter.upstreamEndpoint(),
+                effort, "METERED", meter.cacheCreationTokens(), meter.uncachedInputTokens(), accountCost);
+        Mono.fromRunnable(() -> usagePublisher.publish(event, key.managed()))
+                .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()).subscribe();
     }
 
     private static GatewayException mapError(Throwable e) {

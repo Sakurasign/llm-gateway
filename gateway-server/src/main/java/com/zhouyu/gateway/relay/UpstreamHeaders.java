@@ -19,10 +19,10 @@ public final class UpstreamHeaders {
      */
     public static Map<String, String> authHeaders(Channel channel) {
         return switch (channel.protocol()) {
-            case ANTHROPIC -> Map.of(
+            case ANTHROPIC -> channel.apiKey().isEmpty() ? Map.of("anthropic-version", "2023-06-01") : Map.of(
                     "x-api-key", channel.apiKey(),
                     "anthropic-version", "2023-06-01");
-            case OPENAI_CHAT, OPENAI_RESPONSES -> Map.of(
+            case OPENAI_CHAT, OPENAI_RESPONSES, CODEX_SUBSCRIPTION, WORKBUDDY -> Map.of(
                     "Authorization", "Bearer " + channel.apiKey());
             case GEMINI -> Map.of(
                     "x-goog-api-key", channel.apiKey());

@@ -44,7 +44,16 @@ public class RouteResolver {
      * 否则渠道许可会被耗尽。幂等由 Semaphore 语义保证不够，故由调用方保证只调一次。
      */
     public void release(Decision decision) {
-        gates.release(decision.selected().channel().id());
+        releaseChannel(decision.selected());
+    }
+
+    // Managed accounts acquire their own permit from AccountPool.
+    private boolean acquireChannel(Candidate candidate) {
+        return candidate.route().accountId() != null || gates.acquire(candidate.channel().id(), candidate.channel().maxInflight());
+    }
+
+    private void releaseChannel(Candidate candidate) {
+        if (candidate.route().accountId() == null) gates.release(candidate.channel().id());
     }
 
     /**
@@ -90,7 +99,7 @@ public class RouteResolver {
                 filtered.put("sticky:" + wanted, "NOT_IN_CANDIDATES");
             } else if (!breaker.allowRequest(sticky.channel().id(), sticky.route().upstreamModel())) {
                 filtered.put("sticky:" + wanted, "BREAKER_OPEN");
-            } else if (!gates.acquire(sticky.channel().id(), sticky.channel().maxInflight())) {
+            } else if (!acquireChannel(sticky)) {
                 filtered.put("sticky:" + wanted, "INFLIGHT_FULL");
             } else {
                 return new Decision(sticky, List.of(sticky), filtered,
@@ -106,7 +115,7 @@ public class RouteResolver {
                 filtered.put(c.channel().name(), "BREAKER_OPEN");
                 continue;
             }
-            if (!gates.acquire(c.channel().id(), c.channel().maxInflight())) {
+            if (!acquireChannel(c)) {
                 filtered.put(c.channel().name(), "INFLIGHT_FULL");
                 continue;
             }
@@ -130,7 +139,7 @@ public class RouteResolver {
         // 非本层的已占许可要释放，避免泄漏
         for (Candidate c : healthy) {
             if (c.channel().priority() != bestPriority) {
-                gates.release(c.channel().id());
+                releaseChannel(c);
             }
         }
 
@@ -145,11 +154,25 @@ public class RouteResolver {
         // 同层中已 acquire 却未被选中的必须释放，否则每次请求都会泄漏一个许可
         for (Candidate c : topTier) {
             if (c != selected) {
-                gates.release(c.channel().id());
+                releaseChannel(c);
             }
         }
 
         return new Decision(selected, List.copyOf(healthy), filtered, bestPriority, false);
+    }
+
+    /** 按分组内的顺序占用首个可用渠道。 */
+    public Decision resolveOrdered(String virtualModel, List<Candidate> candidates) {
+        Map<String, String> filtered = new LinkedHashMap<>();
+        for (Candidate candidate : candidates) {
+            var channel = candidate.channel();
+            if (!acquireChannel(candidate)) {
+                filtered.put(channel.name(), "INFLIGHT_FULL");
+                continue;
+            }
+            return new Decision(candidate, List.of(candidate), filtered, channel.priority(), false);
+        }
+        throw new GatewayException(ErrorCode.UPSTREAM_UNAVAILABLE, "模型 " + virtualModel + " 的账号并发已满");
     }
 
     /**

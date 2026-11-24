@@ -17,12 +17,7 @@
   </a>
 </p>
 
-```bash
-git clone https://github.com/Sakurasign/llm-gateway.git
-cd llm-gateway
-cp .env.example .env   # 填入你自己的密码与密钥
-docker compose up -d --build
-```
+部署方式：[本机 JAR](#本机-jar-部署) · [Docker Compose](#docker-compose-部署)
 
 ---
 
@@ -129,7 +124,7 @@ reserve(est) ──▶ 上游调用 ──▶ settle(actual)
 
 - Prometheus 指标（QPS、TTFT、附加延迟分位、熔断状态、成本）
 - 路由决策可回放：每条请求记录候选、过滤原因、选中、重试
-- 管理控制台：概览 / 渠道 / 模型路由 / 请求日志 / Playground
+- 管理控制台：概览 / 账号管理 / 密钥管理 / 通用渠道 / 使用记录
 - **明暗主题切换**
 
 ## 架构
@@ -160,58 +155,65 @@ reserve(est) ──▶ 上游调用 ──▶ settle(actual)
     支撑：Redis（配额/亲和/熔断）  MySQL（配置/账单）  Caffeine（本地缓存）
 ```
 
-## 快速开始
+## 部署
 
-### 前置
-
-- JDK 17+
-- Maven 3.9+
-- Docker（用于 MySQL / Redis / RabbitMQ）
-
-### 1. 配置凭证
+先克隆仓库并复制配置模板。在 Windows PowerShell 中也可以用 `Copy-Item .env.example .env`。
 
 ```bash
+git clone https://github.com/Sakurasign/llm-gateway.git
+cd llm-gateway
 cp .env.example .env
 ```
 
-编辑 `.env`，**必须**设置：
+在仓库根目录的 `.env` 设置 `ADMIN_USERNAME`、`ADMIN_PASSWORD` 和 `ADMIN_JWT_SECRET`。管理员密码至少 8 位。可用 `openssl rand -hex 32` 生成 JWT 密钥，首次部署建议同时设置并备份 `GATEWAY_CONFIG_KEY`。两种方式都会在网关端口提供管理台和 API。
 
-| 变量 | 说明 |
-|---|---|
-| `MYSQL_ROOT_PASSWORD` | MySQL 密码 |
-| `RABBIT_PASS` | RabbitMQ 密码 |
-| `ADMIN_USERNAME` | 管理端用户名 |
-| `ADMIN_PASSWORD` | 管理端密码（>= 8 位，可用 BCrypt 哈希） |
-| `ADMIN_JWT_SECRET` | JWT 密钥（>= 32 字节，`openssl rand -hex 32` 生成） |
+### 本机 JAR 部署
 
-> ⚠️ 本项目**不提供默认密码**。缺少上述变量时应用会**启动失败并给出明确提示**，
-> 这是刻意的 fail-fast 设计，避免演示密码被误用到生产。
+本机需要 Java 17、Maven 3.9+、Node.js 22，以及已启动的 MySQL 8、Redis 和 RabbitMQ。数据库、Redis 和 RabbitMQ 可以运行在本机，也可以连接已有实例。
 
-### 2. 启动
+1. 在 MySQL 创建 `gateway` 数据库并导入初始表结构（首次部署执行）：
+
+   ```bash
+   mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS gateway CHARACTER SET utf8mb4"
+   mysql -u root -p gateway -e "source db/schema.sql"
+   ```
+
+2. 在 `.env` 设置 `MYSQL_PASS`、`RABBIT_PASS`，并按实际连接信息填写以下变量。`MYSQL_USER` 需要对 `gateway` 库有读写和迁移权限。JAR 以 Java Properties 格式读取 `.env`，值直接填写。
+
+   | 变量 | 默认值 |
+   |---|---|
+   | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` | `127.0.0.1` / `3306` / `root` |
+   | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` |
+   | `RABBIT_HOST` / `RABBIT_PORT` / `RABBIT_USER` | `127.0.0.1` / `5672` / `gateway` |
+   | `SERVER_PORT` | `18081` |
+
+3. 在仓库根目录构建并启动网关：
+
+   ```bash
+   npm --prefix gateway-console ci
+   npm --prefix gateway-console run build
+   mvn package
+   java -jar gateway-server/target/gateway-server-0.1.0-SNAPSHOT.jar "--spring.config.import=file:./.env[.properties]" --server.address=127.0.0.1
+   ```
+
+   路径为 `gateway-server/target/gateway-server-0.1.0-SNAPSHOT.jar` 的产物含控制台。默认访问 `http://localhost:18081`，使用 `.env` 中的管理员登录。需要本地模拟上游时可按[运行手册](RUNBOOK.md#三部署与验证)启动 Mock JAR。
+
+### Docker Compose 部署
+
+需要 Docker Engine 或 Docker Desktop，以及 Docker Compose v2 或兼容版本。在 `.env` 设置 `MYSQL_ROOT_PASSWORD` 和 `RABBIT_PASS`，再从仓库根目录执行：
 
 ```bash
 docker compose up -d --build
+docker compose ps
 ```
 
-访问 `http://localhost:18081`（管理端）与内置 Mock 上游。
+Compose 会构建网关和 Mock 上游，并启动 MySQL、Redis、RabbitMQ。MySQL 在空数据卷上自动初始化数据库。网关默认通过 `http://localhost:18081` 访问，宿主机端口可用 `.env` 的 `GATEWAY_PORT` 修改。
 
-### 3. 本地开发
-
-```bash
-# 依赖
-docker compose up -d redis mysql rabbitmq mock-primary mock-backup
-
-# 后端（需先 export 上述环境变量）
-mvn -DskipTests package
-java -jar gateway-server/target/gateway-server-*.jar
-
-# 前端
-cd gateway-console
-npm install
-npm run dev     # http://localhost:5173
-```
+升级前备份 MySQL 和 `.env`，保留原来的配置加密密钥。更新代码后重新执行 `docker compose up -d --build`，已有数据卷会继续使用。
 
 ## 使用示例
+
+本地联调时，在启动前将随机生成的 `DEMO_API_KEY` 填入 `.env`，并在调用端设置相同的值。留空时禁用演示 Key。
 
 ```bash
 # Anthropic 协议调用（Claude Code 可直接用）
@@ -278,19 +280,27 @@ mvn test
 cd gateway-console && npm run build
 ```
 
-测试覆盖：74 个单元测试（协议转换、路由、计费、配额、降权）。
+## 配置与账号
+
+- Docker Compose 构建会将管理台打包进 Gateway，默认从 `http://127.0.0.1:18081/` 打开。本地开发可在 `gateway-console` 下运行 `npm ci` 和 `npm run dev`。
+- 启动时首次导入 `application.yml` 的渠道和模型绑定。之后从 MySQL 装载，控制台修改或导入 YAML 后立即发布新版本。YAML 导入按渠道 ID 和模型绑定合并，文件中省略的记录会保留。
+- 「账号管理」支持浏览器授权和导入 Sub2API 账号 JSON。「添加账号」选择 WorkBuddy 后也可导入凭证 JSON。列表和编辑页显示授权到期时间。Sub2API 导入支持 OpenAI OAuth 账号及其中的具体模型映射。
+- Codex 登录后把浏览器 `http://localhost:1455/auth/callback?...` 的完整地址粘贴回管理台。已有账号可从「更多 → 重新授权」更新凭证。
+- 在「编辑账号」设置模型映射。WorkBuddy 上游模型 ID 带站点前缀，如 `cn:auto`。选择「保存并创建密钥」可直接为当前账号创建密钥。
+- 「密钥管理」按平台分组。密钥可以访问该分组内启用账号的模型。旧密钥编辑保存后切换至分组。点「导入 CC Switch」并选择默认模型，可把网关地址和密钥一起导入 Codex 供应商。
+- 密钥编辑可配置来源 IP 的允许和拒绝名单，支持 IPv4、IPv6 和 CIDR。以网关直接连接的客户端地址为准。经反向代理访问时，该地址是代理地址。
+- `application.yml` 配置的旧密钥和通用模型路由继续使用原有方式。
+- WorkBuddy 凭证迁移时先停用旧程序的刷新和签到，再导入账号。保活与积分刷新自动运行，签到由 `GATEWAY_WORKBUDDY_CHECKIN=true` 启用。
 
 ## 已知限制
 
-- 仅支持 Anthropic / OpenAI Chat / Gemini 三类出口协议；Responses 协议未实现
-- 配置来自 `application.yml`，无热更新（改配置需重启）
-- 管理端只有只读 API（增删渠道需改配置）
-- 未验证多实例部署（亲和与限流依赖 Redis，理论上可水平扩展）
+- 当前面向单实例部署，内存中的续轮绑定在重启后需要客户端重新发送上下文。
+- Responses 转 Chat 支持文本、图片及函数工具。`/v1/chat/completions` 可使用 OpenAI Chat 和 WorkBuddy 渠道。上游内置工具和后台任务需要原生适配。
 
 ## 安全说明
 
 - 管理端凭证与 JWT 密钥**必须**通过环境变量提供，无默认值
-- 上游凭证建议加密存储（当前为配置文件明文，生产应接 KMS）
+- MySQL 中的上游凭证使用 AES-GCM。建议部署前设置并备份独立的 `GATEWAY_CONFIG_KEY`（32 字节 Base64）。未设置时从管理端 JWT 密钥派生，修改 JWT 密钥会导致旧凭证无法解密。
 - 公网部署请务必：启用 HTTPS、限制管理端访问 IP、设置请求速率限制
 - 本项目仅用于合法的 AI API 网关场景，请遵守各上游服务商的条款
 

@@ -23,8 +23,6 @@
 | 管理端 JWT 鉴权 + 渠道/模型/日志/统计 API | ✅ |
 | Vue3 + TypeScript + Element Plus 控制台 | ✅ |
 | 明暗主题切换 | ✅ |
-| Playground 多列流式对比（Temperature / Top-p / TTFT / 成本） | ✅ |
-| Prompt 版本归档（自动存档 / 回填 / 删除） | ✅ |
 
 ---
 
@@ -39,7 +37,7 @@
 | `ADMIN_JWT_SECRET` | ✅ | JWT 密钥（>= 32 字节，`openssl rand -hex 32`） |
 | `MYSQL_PASS` | ✅ | MySQL 密码 |
 | `RABBIT_PASS` | ✅ | RabbitMQ 密码 |
-| `DEMO_API_KEY` | ⬜ | 演示客户端 Key，默认 `sk-lg-demo-key-local` |
+| `DEMO_API_KEY` | ⬜ | 演示客户端 Key，留空禁用。本地联调可用 `openssl rand -hex 32` 生成 |
 
 可选：`SERVER_PORT`（默认 18081）、`REDIS_HOST/PORT`、`MYSQL_HOST/PORT/USER`、`RABBIT_HOST/USER`。
 
@@ -51,80 +49,36 @@ export ADMIN_PASSWORD="$(openssl rand -base64 18)"
 export ADMIN_JWT_SECRET="$(openssl rand -hex 32)"
 export MYSQL_PASS="$(openssl rand -base64 18)"
 export RABBIT_PASS="$(openssl rand -base64 18)"
+export DEMO_API_KEY="$(openssl rand -hex 32)"
 ```
 
 ---
 
-## 三、启动
+## 三、部署与验证
 
-### 1. 依赖容器
+- [本机 JAR 部署](README.md#本机-jar-部署)使用本机 Java 启动带控制台的 JAR，并连接已运行的 MySQL、Redis、RabbitMQ。
+- [Docker Compose 部署](README.md#docker-compose-部署)启动整套容器。使用 `docker compose logs gateway` 查看网关日志。
 
-```bash
-docker run -d --name lg-redis-dev -p 6379:6379 redis:7-alpine
-docker run -d --name lg-mysql -e MYSQL_ROOT_PASSWORD=<你的密码> -e MYSQL_DATABASE=gateway -p 13306:3306 mysql:8.0 --character-set-server=utf8mb4
-docker run -d --name lg-rabbit -e RABBITMQ_DEFAULT_USER=gateway -e RABBITMQ_DEFAULT_PASS=<你的密码> -p 5672:5672 -p 15672:15672 rabbitmq:3.13-management-alpine
-```
+两种方式均可访问 `http://localhost:18081/actuator/health` 检查服务健康状态，再打开 `http://localhost:18081` 登录控制台。
 
-> MySQL 用 **13306** 映射，避免与本机已有 3306 冲突。
+### 本机启动 Mock 上游
 
-### 2. 建表
+按 README 构建 JAR 后，可在两个终端分别运行以下命令，供本地联调和故障切换验证。Compose 已包含这两个服务。
 
 ```bash
-docker cp db/schema.sql lg-mysql:/tmp/schema.sql
-docker exec lg-mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" gateway < /tmp/schema.sql'
-# 验证：应输出 20
-docker exec lg-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='gateway';"
+java -jar mock-upstream/target/mock-upstream-0.1.0-SNAPSHOT.jar --server.address=127.0.0.1 --server.port=9000
+java -jar mock-upstream/target/mock-upstream-0.1.0-SNAPSHOT.jar --server.address=127.0.0.1 --server.port=9001
 ```
 
-### 3. 构建
+使用以下接口示例前，在启动配置和调用端设置相同的 `DEMO_API_KEY`。以下 Bash 示例使用默认端口。
 
-```bash
-mvn -DskipTests package
-```
-
-### 4. 启动 Mock 上游
-
-```bash
-# 主渠道（同时提供 Anthropic 与 OpenAI 两种接口）
-java -jar mock-upstream/target/mock-upstream-0.1.0-SNAPSHOT.jar --server.port=9000
-# 备渠道（故障转移演练用）
-java -jar mock-upstream/target/mock-upstream-0.1.0-SNAPSHOT.jar --server.port=9001
-```
-
-### 5. 启动网关
-
-```bash
-MYSQL_PORT=13306 java -jar gateway-server/target/gateway-server-0.1.0-SNAPSHOT.jar
-```
-
-> 默认端口 **18081**（8081 常被 Docker Desktop 等占用，`SERVER_PORT` 可覆盖）。
-
-### 6. 初始化余额
-
-```bash
-redis-cli SET quota:1:balance 9999999999   # micro-USD，约 10000 USD
-redis-cli SET quota:1:reserved 0
-```
-
-### 7. 前端控制台
-
-```bash
-cd gateway-console
-npm install
-npm run dev     # http://localhost:5173
-```
-
-登录：使用你在 `.env` 中设置的 `ADMIN_USERNAME` / `ADMIN_PASSWORD`
-
----
-
-## 三、验证
+## 四、接口验证
 
 ### 流式（Anthropic 透传）
 
 ```bash
 curl -N http://127.0.0.1:18081/v1/messages \
-  -H "x-api-key: sk-lg-demo-key-local" \
+  -H "x-api-key: $DEMO_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4","max_tokens":20,"stream":true,
        "messages":[{"role":"user","content":"hi"}]}'
@@ -135,7 +89,7 @@ curl -N http://127.0.0.1:18081/v1/messages \
 ```bash
 # 注意 model 用 gpt-4o-mini（配置里指向 OPENAI_CHAT 渠道）
 curl -N http://127.0.0.1:18081/v1/messages \
-  -H "x-api-key: sk-lg-demo-key-local" \
+  -H "x-api-key: $DEMO_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","max_tokens":64,"stream":true,
        "messages":[{"role":"user","content":"hi"}]}'
@@ -146,16 +100,16 @@ curl -N http://127.0.0.1:18081/v1/messages \
 
 ```bash
 # 401
-curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: wrong" \
+curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: ${DEMO_API_KEY}-invalid" \
   -H "Content-Type: application/json" -d '{"model":"claude-sonnet-4","messages":[]}'
 
 # 404
-curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: sk-lg-demo-key-local" \
+curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: $DEMO_API_KEY" \
   -H "Content-Type: application/json" -d '{"model":"no-such","messages":[]}'
 
 # 402（把余额调小）
 redis-cli SET quota:1:balance 100
-curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: sk-lg-demo-key-local" \
+curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: $DEMO_API_KEY" \
   -H "Content-Type: application/json" -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}'
 ```
 
@@ -186,7 +140,7 @@ docker exec lg-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e \
 ```bash
 # 杀掉主渠道进程
 kill <mock-primary-pid>
-curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: sk-lg-demo-key-local" \
+curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: $DEMO_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}'
 # 期望 HTTP 200，日志 settled 行显示 channel=anthropic-backup, priority=20
@@ -194,7 +148,7 @@ curl -i http://127.0.0.1:18081/v1/messages -H "x-api-key: sk-lg-demo-key-local" 
 
 ---
 
-## 四、压测
+## 五、压测
 
 ```bash
 # 吞吐 + 稳定性
@@ -209,20 +163,17 @@ node scripts/measure-overhead.mjs --mode gateway --concurrency 20 --samples 400
 
 ---
 
-## 五、已知限制与后续工作
+## 六、已知限制与后续工作
 
 | 限制 | 影响 | 后续方案 |
 |---|---|---|
 | 配额按请求预扣，每请求 1 次 Redis RTT | 50 并发时 P99 升至 ~19ms | 余额分 available/frozen 子账户 + 租约（见报告 §4.3 复盘） |
 | Lettuce reactive 单连接 | 高并发时预扣排队 | 换非 reactive 模板 + 连接池，或 Redis Cluster |
-| 配置来自 yml，无热更新 | 改配置需重启 | 接 MySQL 快照 + Redis 失效广播 |
-| 管理端写操作（增删渠道）未实现 | 只能看不能改 | 补 CRUD + 配置版本 |
-| 仅 Anthropic / OpenAI Chat 两协议完整 | Gemini / Responses 未实现 | 补对应适配器（IR 已就绪） |
 | 单实例验证 | 未验证多节点 | 需共享 Redis + 配置广播 |
 
 ---
 
-## 六、故障速查
+## 七、故障速查
 
 | 现象 | 可能原因 | 排查 |
 |---|---|---|

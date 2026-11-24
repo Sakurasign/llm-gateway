@@ -10,6 +10,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 管理端 JWT 过滤器。
@@ -59,8 +60,8 @@ public class AdminAuthFilter implements WebFilter {
 
     private Mono<Void> unauthorized(ServerWebExchange exchange, String msg) {
         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-        exchange.getResponse().getHeaders().add("Content-Type", "application/json");
-        byte[] body = ("{\"error\":{\"message\":\"" + msg + "\",\"code\":\"unauthorized\"}}").getBytes();
+        exchange.getResponse().getHeaders().setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
+        byte[] body = ("{\"error\":{\"message\":\"" + msg + "\",\"code\":\"unauthorized\"}}").getBytes(StandardCharsets.UTF_8);
         return exchange.getResponse().writeWith(
                 Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
     }
